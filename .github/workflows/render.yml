@@ -1,21 +1,43 @@
-name: Render Video
+name: Render Video Fakta
 
 on:
   workflow_dispatch:
     inputs:
+      topic:
+        description: "Topik untuk judul SEO, mis. Octopus"
+        default: "Octopus"
       hook:
-        description: "Kalimat pembuka"
-        default: "Did you know?"
+        description: "Kalimat pembuka (hook)"
+        default: "Did you know octopuses have three hearts?"
       fact:
-        description: "Isi fakta (bahasa Inggris)"
-        default: "Octopuses have three hearts and blue blood."
+        description: "Isi fakta untuk narasi (Inggris, 2-4 kalimat)"
+        default: "Two hearts pump blood to the gills, and one pumps it to the rest of the body. Their blood is blue because it uses copper instead of iron. Amazing, right?"
+      footage:
+        description: "Kata kunci footage (Inggris), mis. ocean underwater"
+        default: "ocean underwater"
+      emoji:
+        description: "Emoji utama"
+        default: "🐙"
+      voice:
+        description: "Suara AI"
+        type: choice
+        default: en-US-AndrewMultilingualNeural
+        options:
+          - en-US-AndrewMultilingualNeural
+          - en-US-AvaMultilingualNeural
+          - en-US-BrianMultilingualNeural
+          - en-US-EmmaMultilingualNeural
+          - en-US-GuyNeural
+          - en-US-JennyNeural
+          - en-GB-RyanNeural
+      handle:
+        description: "Nama channel"
+        default: "@DailyFactsHub"
 
 jobs:
   render:
     runs-on: ubuntu-latest
-    env:
-      HOOK: ${{ inputs.hook }}
-      FACT: ${{ inputs.fact }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -23,14 +45,20 @@ jobs:
         with:
           node-version: 20
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Pasang library sistem
         run: |
           sudo apt-get update
-          sudo apt-get install -y libnss3 libdbus-1-3 libatk1.0-0 libasound2t64 libxrandr2 libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libgbm-dev libatk-bridge2.0-0
+          sudo apt-get install -y ffmpeg fonts-noto-color-emoji fonts-liberation libnss3 libdbus-1-3 libatk1.0-0 libasound2t64 libxrandr2 libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libgbm-dev libatk-bridge2.0-0
+          fc-cache -f
+          pip install -U edge-tts
 
       - name: Buat file proyek
         run: |
-          mkdir -p src
+          mkdir -p src public out
           cat > package.json << 'EOF'
           {
             "name": "fakta-harian",
@@ -55,59 +83,528 @@ jobs:
           registerRoot(RemotionRoot);
           EOF
           cat > src/Root.tsx << 'EOF'
+          import React from "react";
           import {Composition} from "remotion";
           import {Fact} from "./Composition";
-          export const RemotionRoot = () => (
+          import type {Props} from "./Composition";
+
+          const defaults: Props = {
+            hook: "Did you know?",
+            emoji: "💡",
+            handle: "@DailyFactsHub",
+            words: [],
+            segments: [],
+            voiceDur: 5,
+            durationFrames: 240,
+          };
+
+          export const RemotionRoot: React.FC = () => (
             <Composition
               id="Fact"
               component={Fact}
-              durationInFrames={450}
-              fps={30}
               width={1080}
               height={1920}
-              defaultProps={{hook: "Did you know?", fact: "Honey never spoils."}}
+              fps={30}
+              durationInFrames={240}
+              defaultProps={defaults}
+              calculateMetadata={({props}) => ({
+                durationInFrames: Math.max(60, props.durationFrames),
+              })}
             />
           );
           EOF
           cat > src/Composition.tsx << 'EOF'
-          import {AbsoluteFill, interpolate, Sequence, useCurrentFrame} from "remotion";
-          import type {ReactNode} from "react";
-          const Fade = ({children}: {children: ReactNode}) => {
+          import React, {useMemo} from "react";
+          import {
+            AbsoluteFill,
+            Audio,
+            OffthreadVideo,
+            Sequence,
+            interpolate,
+            spring,
+            staticFile,
+            useCurrentFrame,
+            useVideoConfig,
+          } from "remotion";
+
+          type Word = {text: string; start: number; end: number};
+          type Seg = {src: string; from: number; dur: number};
+          export type Props = {
+            hook: string;
+            emoji: string;
+            handle: string;
+            words: Word[];
+            segments: Seg[];
+            voiceDur: number;
+            durationFrames: number;
+          };
+          type Page = {words: Word[]; start: number};
+
+          const FONT = "'Arial Black', 'Liberation Sans', Arial, sans-serif";
+
+          const makePages = (words: Word[]): Page[] => {
+            const pages: Page[] = [];
+            let cur: Word[] = [];
+            const flush = () => {
+              if (cur.length) {
+                pages.push({words: cur, start: cur[0].start});
+                cur = [];
+              }
+            };
+            words.forEach((w) => {
+              cur.push(w);
+              const chars = cur.map((x) => x.text).join(" ").length;
+              const hard = /[.!?]$/.test(w.text);
+              const soft = /[,;:]$/.test(w.text) && cur.length >= 2;
+              if (hard || soft || cur.length >= 4 || chars > 20) flush();
+            });
+            flush();
+            return pages;
+          };
+
+          const Clip: React.FC<{src: string; first: boolean}> = ({src, first}) => {
             const f = useCurrentFrame();
-            const opacity = interpolate(f, [0, 15], [0, 1], {extrapolateRight: "clamp"});
+            const fade = first ? 1 : interpolate(f, [0, 12], [0, 1], {extrapolateRight: "clamp"});
+            const zoom = 1 + f * 0.0003;
             return (
-              <AbsoluteFill style={{justifyContent: "center", alignItems: "center", padding: 80, opacity}}>
-                {children}
+              <AbsoluteFill style={{opacity: fade, transform: `scale(${zoom})`}}>
+                <OffthreadVideo
+                  src={staticFile(src)}
+                  muted
+                  style={{width: "100%", height: "100%", objectFit: "cover"}}
+                />
               </AbsoluteFill>
             );
           };
-          export const Fact = ({hook, fact}: {hook: string; fact: string}) => (
-            <AbsoluteFill style={{background: "linear-gradient(160deg,#1e3a8a,#7c3aed)", fontFamily: "Arial, sans-serif", textAlign: "center"}}>
-              <Sequence from={0} durationInFrames={90}>
-                <Fade><h1 style={{color: "#fde047", fontSize: 130}}>{hook}</h1></Fade>
-              </Sequence>
-              <Sequence from={90}>
-                <Fade><p style={{color: "white", fontSize: 72, lineHeight: 1.3}}>{fact}</p></Fade>
-              </Sequence>
-            </AbsoluteFill>
-          );
+
+          const Outro: React.FC<{handle: string}> = ({handle}) => {
+            const f = useCurrentFrame();
+            const {fps} = useVideoConfig();
+            const s = spring({frame: f, fps, config: {damping: 10}});
+            return (
+              <AbsoluteFill
+                style={{
+                  justifyContent: "center",
+                  alignItems: "center",
+                  textAlign: "center",
+                  transform: `scale(${s})`,
+                  fontFamily: FONT,
+                }}
+              >
+                <div style={{fontSize: 150, fontWeight: 900, color: "#FFE14D", WebkitTextStroke: "12px #1a1033", paintOrder: "stroke fill"}}>
+                  FOLLOW
+                </div>
+                <div style={{fontSize: 62, fontWeight: 800, color: "#fff", marginTop: 20}}>
+                  for a new fact every day
+                </div>
+                <div style={{fontSize: 70, fontWeight: 900, color: "#7CFFB2", marginTop: 40}}>
+                  {handle}
+                </div>
+              </AbsoluteFill>
+            );
+          };
+
+          export const Fact: React.FC<Props> = ({emoji, handle, words, segments, voiceDur, durationFrames}) => {
+            const f = useCurrentFrame();
+            const {fps, width} = useVideoConfig();
+            const t = f / fps;
+            const pages = useMemo(() => makePages(words), [words]);
+
+            let idx = 0;
+            pages.forEach((p, i) => {
+              if (t >= p.start - 0.05) idx = i;
+            });
+            const page = pages[idx];
+            const pageStartFrame = page ? Math.round(page.start * fps) : 0;
+            const pop = spring({frame: Math.max(0, f - pageStartFrame), fps, config: {damping: 11, stiffness: 180}});
+            const outroStart = Math.round((voiceDur + 0.2) * fps);
+            const showCaptions = f < outroStart;
+
+            const emojiIn = spring({frame: f, fps, config: {damping: 8}});
+            const bob = Math.sin(f / 12) * 18;
+            const progress = Math.min(1, f / durationFrames);
+
+            return (
+              <AbsoluteFill style={{fontFamily: FONT, overflow: "hidden", background: "#000"}}>
+                {(segments || []).map((sg, i) => (
+                  <Sequence key={i} from={Math.round(sg.from * fps)} durationInFrames={Math.round(sg.dur * fps) + 12}>
+                    <Clip src={sg.src} first={i === 0} />
+                  </Sequence>
+                ))}
+
+                <AbsoluteFill style={{background: "rgba(0,0,0,0.32)"}} />
+
+                <div style={{position: "absolute", top: 110, left: 120, width: width - 240, height: 10, borderRadius: 5, background: "rgba(255,255,255,0.2)"}}>
+                  <div style={{width: `${progress * 100}%`, height: "100%", borderRadius: 5, background: "#FFE14D"}} />
+                </div>
+
+                <div style={{position: "absolute", top: 170, width, textAlign: "center"}}>
+                  <span style={{display: "inline-block", padding: "16px 48px", borderRadius: 60, background: "rgba(255,255,255,0.16)", color: "#fff", fontSize: 42, fontWeight: 800, letterSpacing: 8}}>
+                    DAILY FACT
+                  </span>
+                </div>
+
+                {showCaptions && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: 320,
+                      width,
+                      textAlign: "center",
+                      fontSize: 220,
+                      transform: `translateY(${bob}px) scale(${emojiIn})`,
+                    }}
+                  >
+                    {emoji}
+                  </div>
+                )}
+
+                {showCaptions && page && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: 820,
+                      left: 60,
+                      width: width - 120,
+                      height: 420,
+                      display: "flex",
+                      flexWrap: "wrap",
+                      justifyContent: "center",
+                      alignContent: "center",
+                      transform: `scale(${0.85 + 0.15 * pop})`,
+                      opacity: Math.min(1, pop * 1.5),
+                    }}
+                  >
+                    {page.words.map((w, i) => {
+                      const spoken = t >= w.start - 0.02;
+                      const last = i === page.words.length - 1;
+                      const active = spoken && (last || t < page.words[i + 1].start);
+                      return (
+                        <span
+                          key={i}
+                          style={{
+                            display: "inline-block",
+                            margin: "6px 14px",
+                            fontSize: 108,
+                            fontWeight: 900,
+                            textTransform: "uppercase",
+                            color: active ? "#FFE14D" : spoken ? "#FFFFFF" : "rgba(255,255,255,0.35)",
+                            transform: `scale(${active ? 1.16 : 1})`,
+                            WebkitTextStroke: "14px #1a1033",
+                            paintOrder: "stroke fill",
+                            textShadow: "0 10px 30px rgba(0,0,0,0.5)",
+                          }}
+                        >
+                          {w.text}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <Sequence from={outroStart}>
+                  <Outro handle={handle} />
+                </Sequence>
+
+                <Audio
+                  src={staticFile("music.mp3")}
+                  loop
+                  volume={(fr) =>
+                    interpolate(fr, [0, 20, durationFrames - 30, durationFrames], [0, 0.11, 0.11, 0], {
+                      extrapolateLeft: "clamp",
+                      extrapolateRight: "clamp",
+                    })
+                  }
+                />
+                <Audio src={staticFile("voice.mp3")} volume={1} />
+                <Sequence from={0} durationInFrames={40}>
+                  <Audio src={staticFile("whoosh.mp3")} volume={0.45} />
+                </Sequence>
+                {pages.map((p, i) =>
+                  i > 0 ? (
+                    <Sequence key={i} from={Math.round(p.start * fps)} durationInFrames={12}>
+                      <Audio src={staticFile("pop.mp3")} volume={0.18} />
+                    </Sequence>
+                  ) : null
+                )}
+                <Sequence from={outroStart} durationInFrames={60}>
+                  <Audio src={staticFile("ding.mp3")} volume={0.4} />
+                </Sequence>
+              </AbsoluteFill>
+            );
+          };
           EOF
-          cat > makeprops.js << 'EOF'
-          const fs = require("fs");
-          const props = { hook: process.env.HOOK, fact: process.env.FACT };
-          fs.writeFileSync("props.json", JSON.stringify(props));
+          cat > prep.py << 'EOF'
+          import asyncio, json, math, os, random, re, shutil, subprocess
+          import urllib.parse, urllib.request
+          import edge_tts
+
+          hook = os.environ.get("HOOK", "").strip()
+          fact = os.environ.get("FACT", "").strip()
+          topic = os.environ.get("TOPIC", "Facts").strip()
+          emoji = os.environ.get("EMOJI", "").strip() or "💡"
+          voice = os.environ.get("VOICE", "").strip() or "en-US-GuyNeural"
+          handle = os.environ.get("HANDLE", "@DailyFactsHub").strip()
+          footage = os.environ.get("FOOTAGE", "").strip() or topic
+
+          if hook and hook[-1] not in ".?!":
+              hook += "."
+          text = (hook + " " + fact).strip()
+          tokens = text.split()
+          FPS = 30
+
+          async def synth(v):
+              try:
+                  com = edge_tts.Communicate(text, v, rate="+4%", boundary="WordBoundary")
+              except TypeError:
+                  com = edge_tts.Communicate(text, v, rate="+4%")
+              audio = bytearray()
+              wb = []
+              async for ch in com.stream():
+                  if ch["type"] == "audio":
+                      audio.extend(ch["data"])
+                  elif ch["type"] == "WordBoundary":
+                      off = ch["offset"] / 1e7
+                      wb.append({"start": off, "end": off + ch["duration"] / 1e7})
+              if not audio:
+                  raise RuntimeError("tidak ada audio")
+              return bytes(audio), wb
+
+          audio = None
+          for v in [voice, voice, "en-US-GuyNeural", "en-US-GuyNeural"]:
+              try:
+                  audio, wb = asyncio.run(synth(v))
+                  print("Suara dipakai:", v)
+                  break
+              except Exception as e:
+                  print("Gagal dengan", v, ":", e)
+          if audio is None:
+              raise SystemExit("Suara gagal dibuat. Jalankan ulang workflow.")
+
+          os.makedirs("public", exist_ok=True)
+          os.makedirs("out", exist_ok=True)
+          with open("public/voice.mp3", "wb") as fh:
+              fh.write(audio)
+
+          r = subprocess.run(
+              ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", "public/voice.mp3"],
+              capture_output=True, text=True)
+          voice_dur = float(r.stdout.strip())
+
+          words = []
+          if len(wb) == len(tokens):
+              for tok, w in zip(tokens, wb):
+                  words.append({"text": tok, "start": w["start"], "end": w["end"]})
+          else:
+              t0 = wb[0]["start"] if wb else 0.1
+              t1 = wb[-1]["end"] if wb else max(voice_dur - 0.1, t0 + 1)
+              weights = []
+              for tok in tokens:
+                  wgt = len(tok) + 1
+                  if tok[-1] in ".?!":
+                      wgt += 5
+                  elif tok[-1] in ",;:":
+                      wgt += 2
+                  weights.append(wgt)
+              total = sum(weights)
+              cur = t0
+              for tok, wgt in zip(tokens, weights):
+                  d = (t1 - t0) * wgt / total
+                  words.append({"text": tok, "start": cur, "end": cur + d})
+                  cur += d
+
+          TW, TH = 1080, 1920
+
+          def cover_scale(w, h):
+              return max(TW / float(w), TH / float(h))
+
+          def http_json(url, headers):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  return json.loads(resp.read().decode("utf-8"))
+
+          def pexels_videos(query, key):
+              hdr = {"Authorization": key, "User-Agent": "Mozilla/5.0"}
+              q = urllib.parse.quote(query)
+              vids = []
+              for base in ["https://api.pexels.com/videos/search", "https://api.pexels.com/v1/videos/search"]:
+                  try:
+                      data = http_json(base + "?query=" + q + "&orientation=portrait&min_duration=5&max_duration=40&per_page=40", hdr)
+                      vids = data.get("videos", [])
+                  except Exception as e:
+                      print("Pexels gagal:", base, e)
+                      vids = []
+                  if vids:
+                      break
+              items = []
+              for v in vids:
+                  files = []
+                  for x in v.get("video_files", []):
+                      if x.get("file_type") == "video/mp4" and x.get("width") and x.get("height") and x.get("link"):
+                          files.append({"link": x["link"], "w": x["width"], "h": x["height"], "size": 0})
+                  if files:
+                      items.append({"source": "Pexels", "dur": float(v.get("duration", 6)), "files": files})
+              return items
+
+          def pixabay_videos(query, key):
+              q = urllib.parse.quote(query[:100])
+              url = "https://pixabay.com/api/videos/?key=" + key + "&q=" + q + "&video_type=film&min_width=1080&per_page=40&safesearch=true"
+              try:
+                  data = http_json(url, {"User-Agent": "Mozilla/5.0"})
+              except Exception as e:
+                  print("Pixabay gagal:", e)
+                  return []
+              items = []
+              for h in data.get("hits", []):
+                  files = []
+                  for name in ["large", "medium", "small", "tiny"]:
+                      x = (h.get("videos") or {}).get(name) or {}
+                      if x.get("url") and x.get("width") and x.get("height"):
+                          files.append({"link": x["url"], "w": x["width"], "h": x["height"], "size": x.get("size", 0) or 0})
+                  if files:
+                      items.append({"source": "Pixabay", "dur": float(h.get("duration", 6)), "files": files})
+              return items
+
+          def best_file(files):
+              ok = [f for f in files if cover_scale(f["w"], f["h"]) <= 1.12 and f["size"] <= 150 * 1024 * 1024]
+              return min(ok, key=lambda f: f["w"] * f["h"]) if ok else None
+
+          def fetch_footage(query, total):
+              pk = os.environ.get("PEXELS_API_KEY", "").strip()
+              xk = os.environ.get("PIXABAY_API_KEY", "").strip()
+              if not pk and not xk:
+                  raise SystemExit("GAGAL: isi PEXELS_API_KEY dan/atau PIXABAY_API_KEY di Settings > Secrets and variables > Actions")
+              lists = []
+              if pk:
+                  lists.append(pexels_videos(query, pk))
+              if xk:
+                  lists.append(pixabay_videos(query, xk))
+              for lst in lists:
+                  random.shuffle(lst)
+              pool = []
+              for i in range(max(len(lst) for lst in lists)):
+                  for lst in lists:
+                      if i < len(lst):
+                          pool.append(lst[i])
+              pool = [p for p in pool if p["dur"] >= 5 and best_file(p["files"])]
+              if not pool:
+                  raise SystemExit("GAGAL: tidak ada footage kualitas tinggi (min. Full HD) untuk kata kunci: " + query + ". Ganti kata kunci footage lalu jalankan ulang.")
+
+              need = min(6, max(3, int(math.ceil(total / 6.0))))
+              clips = []
+              tried = 0
+              for p in pool:
+                  if len(clips) >= need or tried >= 14:
+                      break
+                  tried += 1
+                  f = best_file(p["files"])
+                  raw = "raw%d.mp4" % tried
+                  name = "clip%d.mp4" % len(clips)
+                  proc = min(p["dur"], 7.0)
+                  try:
+                      req = urllib.request.Request(f["link"], headers={"User-Agent": "Mozilla/5.0"})
+                      with urllib.request.urlopen(req, timeout=120) as resp, open(raw, "wb") as out:
+                          shutil.copyfileobj(resp, out)
+                      vf = "scale=%d:%d:force_original_aspect_ratio=increase:flags=lanczos,crop=%d:%d,fps=30,setsar=1" % (TW, TH, TW, TH)
+                      subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", raw, "-t", "%.2f" % proc, "-vf", vf,
+                                      "-an", "-c:v", "libx264", "-crf", "16", "-preset", "medium",
+                                      "-pix_fmt", "yuv420p", "-movflags", "+faststart", "public/" + name], check=True)
+                      clips.append({"src": name, "dur": proc, "source": p["source"]})
+                      print("Footage siap:", name, p["source"], "sumber", f["w"], "x", f["h"])
+                  except Exception as e:
+                      print("Klip gagal diproses:", e)
+                  finally:
+                      if os.path.exists(raw):
+                          os.remove(raw)
+              if not clips:
+                  raise SystemExit("GAGAL: tidak ada klip yang berhasil diunduh. Jalankan ulang atau ganti kata kunci.")
+
+              segs, t, i = [], 0.0, 0
+              while t < total:
+                  c = clips[i % len(clips)]
+                  d = max(2.0, min(c["dur"] - 0.6, 6.0))
+                  segs.append({"src": c["src"], "from": round(t, 3), "dur": round(d, 3)})
+                  t += d
+                  i += 1
+              return segs, sorted(set(c["source"] for c in clips))
+
+          frames = int(math.ceil((voice_dur + 2.2) * FPS))
+          segments, sources = fetch_footage(footage, frames / float(FPS))
+          props = {"hook": hook, "emoji": emoji, "handle": handle, "words": words, "segments": segments,
+                   "voiceDur": voice_dur, "durationFrames": frames}
+          with open("props.json", "w", encoding="utf-8") as fh:
+              json.dump(props, fh, ensure_ascii=False)
+
+          def ts(s):
+              ms = int(round(s * 1000))
+              return "%02d:%02d:%02d,%03d" % (ms // 3600000, ms // 60000 % 60, ms // 1000 % 60, ms % 1000)
+
+          lines, cur_l = [], []
+          for w in words:
+              cur_l.append(w)
+              if len(cur_l) >= 6 or w["text"][-1] in ".?!":
+                  lines.append(cur_l)
+                  cur_l = []
+          if cur_l:
+              lines.append(cur_l)
+          srt = []
+          for i, ln in enumerate(lines, 1):
+              srt.append("%d\n%s --> %s\n%s\n" % (i, ts(ln[0]["start"]), ts(ln[-1]["end"] + 0.2), " ".join(x["text"] for x in ln)))
+          with open("out/captions.srt", "w", encoding="utf-8") as fh:
+              fh.write("\n".join(srt))
+
+          topic_tag = "".join(x.capitalize() for x in re.sub(r"[^A-Za-z0-9 ]", "", topic).split())
+          base = ["facts", "didyouknow", "dailyfacts", "funfacts", "trivia", "mindblown", "learnontiktok", "fyp"]
+          tags = ([topic_tag.lower()] if topic_tag else []) + base
+          hashtags = " ".join("#" + x for x in tags[:8])
+          title = (hook.rstrip(".") + " " + emoji)
+          if len(title) > 80:
+              title = title[:77].rstrip() + "..."
+          title += " #Shorts"
+          desc = (hook + " " + fact + "\n\nFollow " + handle + " for a new fact every day!\n\nFootage: " + ", ".join(sources) + "\n\n" + hashtags + " #shorts")
+          tiktok = hook + " " + emoji + " " + " ".join("#" + x for x in tags[:6])
+          meta = ("=== YOUTUBE SHORTS ===\nJUDUL:\n" + title + "\n\nDESKRIPSI:\n" + desc +
+                  "\n\nTAGS (isi di kolom tag):\n" + ", ".join(tags) +
+                  "\n\n=== TIKTOK ===\nCAPTION:\n" + tiktok +
+                  "\n\nTIPS: unggah captions.srt di YouTube (Subtitles) untuk SEO tambahan.\n")
+          with open("out/metadata.txt", "w", encoding="utf-8") as fh:
+              fh.write(meta)
+          print("Durasi suara:", voice_dur, "detik; total frame:", frames)
           EOF
 
-      - name: Pasang dependensi
+      - name: Buat suara AI, data, dan efek suara
+        env:
+          TOPIC: ${{ inputs.topic }}
+          HOOK: ${{ inputs.hook }}
+          FACT: ${{ inputs.fact }}
+          EMOJI: ${{ inputs.emoji }}
+          VOICE: ${{ inputs.voice }}
+          HANDLE: ${{ inputs.handle }}
+          FOOTAGE: ${{ inputs.footage }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+        run: |
+          python prep.py
+          ffmpeg -y -v error -f lavfi -i "anoisesrc=d=0.9:c=pink:r=44100:a=0.6" -af "highpass=f=200,lowpass=f=5000,afade=t=in:st=0:d=0.35,afade=t=out:st=0.35:d=0.55" public/whoosh.mp3
+          ffmpeg -y -v error -f lavfi -i "sine=f=900:d=0.12" -af "afade=t=out:st=0:d=0.12" public/pop.mp3
+          ffmpeg -y -v error -f lavfi -i "sine=f=1318:d=1.2" -f lavfi -i "sine=f=1976:d=1.2" -filter_complex "amix=inputs=2,afade=t=out:st=0:d=1.2" public/ding.mp3
+          if [ -f music.mp3 ]; then
+            cp music.mp3 public/music.mp3
+          else
+            ffmpeg -y -v error -f lavfi -i "sine=f=110:d=75" -f lavfi -i "sine=f=164.81:d=75" -f lavfi -i "sine=f=220:d=75" -f lavfi -i "sine=f=277.18:d=75" -filter_complex "amix=inputs=4,tremolo=f=0.25:d=0.4,lowpass=f=1200,volume=3,afade=t=in:d=2" public/music.mp3
+          fi
+          ls -la public out
+
+      - name: Pasang Remotion
         run: npm install
 
-      - name: Siapkan teks
-        run: node makeprops.js
-
       - name: Render video
-        run: npx remotion render src/index.ts Fact out/video.mp4 --props=props.json
+        run: npx remotion render src/index.ts Fact out/video.mp4 --props=props.json --crf=16 --jpeg-quality=95 --x264-preset=slow --timeout=120000
 
       - uses: actions/upload-artifact@v4
         with:
-          name: video
-          path: out/video.mp4
+          name: hasil-video
+          path: |
+            out/video.mp4
+            out/metadata.txt
+            out/captions.srt

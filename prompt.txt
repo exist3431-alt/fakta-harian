@@ -1,0 +1,10 @@
+topic: 10 Deepest Ocean Locations
+hook: Did you know some fish survive in the deepest parts of the ocean, where sunlight never reaches?
+fact: Explore 10 of Earth's deepest ocean locations, from the Mariana Trench to the Tonga Trench, Philippine Trench, Kermadec Trench, Kuril-Kamchatka Trench, Japan Trench, Izu-Ogasawara Trench, Puerto Rico Trench, South Sandwich Trench, and Java Trench. Discover their extraordinary depths and the rare deep-sea creatures found in these mysterious environments, including hadal snailfish, deep-sea anglerfish, and other remarkable species. The deepest confirmed fish sighting reached 8,336 meters below the surface! These creatures survive under extreme pressure in near-total darkness. Which one would you want to discover?
+sumber: NOAA Ocean Exploration, NOAA Fisheries, scientific research publications, Pixabay
+footage: cinematic deep ocean exploration, underwater trench landscapes, remotely operated vehicle footage, rare deep-sea fish, hadal snailfish, deep-sea anglerfish, bioluminescent marine life, dark blue abyss, realistic ocean floor, dramatic underwater lighting
+voice: en-US-AndrewMultilingualNeural
+emoji: 🌊🐟
+handle: @DailyFactsHub
+top_text: this is wild...
+bottom_text: Wait for it :)

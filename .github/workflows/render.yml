@@ -33,11 +33,17 @@ on:
       handle:
         description: "Nama channel"
         default: "@DailyFactsHub"
+      top_text:
+        description: "Teks kecil di atas layar (opsional)"
+        default: ""
+      bottom_text:
+        description: "Teks di bawah pada 3 detik awal (opsional)"
+        default: "Wait for it :)"
 
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -90,12 +96,14 @@ jobs:
 
           const defaults: Props = {
             hook: "Did you know?",
-            emoji: "💡",
-            handle: "@DailyFactsHub",
+            emoji: "",
+            handle: "",
             words: [],
             segments: [],
             voiceDur: 5,
             durationFrames: 240,
+            topText: "",
+            bottomText: "",
           };
 
           export const RemotionRoot: React.FC = () => (
@@ -114,7 +122,7 @@ jobs:
           );
           EOF
           cat > src/Composition.tsx << 'EOF'
-          import React, {useMemo} from "react";
+          import React from "react";
           import {
             AbsoluteFill,
             Audio,
@@ -128,7 +136,7 @@ jobs:
           } from "remotion";
 
           type Word = {text: string; start: number; end: number};
-          type Seg = {src: string; from: number; dur: number};
+          type Seg = {src: string; fromF: number; durF: number; startF: number};
           export type Props = {
             hook: string;
             emoji: string;
@@ -137,39 +145,23 @@ jobs:
             segments: Seg[];
             voiceDur: number;
             durationFrames: number;
+            topText: string;
+            bottomText: string;
           };
-          type Page = {words: Word[]; start: number};
 
           const FONT = "'Arial Black', 'Liberation Sans', Arial, sans-serif";
+          const TEXT_FONT = "'Liberation Sans', Arial, sans-serif";
 
-          const makePages = (words: Word[]): Page[] => {
-            const pages: Page[] = [];
-            let cur: Word[] = [];
-            const flush = () => {
-              if (cur.length) {
-                pages.push({words: cur, start: cur[0].start});
-                cur = [];
-              }
-            };
-            words.forEach((w) => {
-              cur.push(w);
-              const chars = cur.map((x) => x.text).join(" ").length;
-              const hard = /[.!?]$/.test(w.text);
-              const soft = /[,;:]$/.test(w.text) && cur.length >= 2;
-              if (hard || soft || cur.length >= 4 || chars > 20) flush();
-            });
-            flush();
-            return pages;
-          };
+          const clean = (s: string) => s.replace(/[.,;:]+$/g, "");
 
-          const Clip: React.FC<{src: string; first: boolean}> = ({src, first}) => {
+          const Clip: React.FC<{src: string; startFrom: number}> = ({src, startFrom}) => {
             const f = useCurrentFrame();
-            const fade = first ? 1 : interpolate(f, [0, 12], [0, 1], {extrapolateRight: "clamp"});
-            const zoom = 1 + f * 0.0003;
+            const zoom = interpolate(f, [0, 6], [1.07, 1], {extrapolateRight: "clamp"});
             return (
-              <AbsoluteFill style={{opacity: fade, transform: `scale(${zoom})`}}>
+              <AbsoluteFill style={{transform: `scale(${zoom})`}}>
                 <OffthreadVideo
                   src={staticFile(src)}
+                  startFrom={startFrom}
                   muted
                   style={{width: "100%", height: "100%", objectFit: "cover"}}
                 />
@@ -177,165 +169,121 @@ jobs:
             );
           };
 
-          const Outro: React.FC<{handle: string}> = ({handle}) => {
-            const f = useCurrentFrame();
-            const {fps} = useVideoConfig();
-            const s = spring({frame: f, fps, config: {damping: 10}});
-            return (
-              <AbsoluteFill
-                style={{
-                  justifyContent: "center",
-                  alignItems: "center",
-                  textAlign: "center",
-                  transform: `scale(${s})`,
-                  fontFamily: FONT,
-                }}
-              >
-                <div style={{fontSize: 150, fontWeight: 900, color: "#FFE14D", WebkitTextStroke: "12px #1a1033", paintOrder: "stroke fill"}}>
-                  FOLLOW
-                </div>
-                <div style={{fontSize: 62, fontWeight: 800, color: "#fff", marginTop: 20}}>
-                  for a new fact every day
-                </div>
-                <div style={{fontSize: 70, fontWeight: 900, color: "#7CFFB2", marginTop: 40}}>
-                  {handle}
-                </div>
-              </AbsoluteFill>
-            );
-          };
-
-          export const Fact: React.FC<Props> = ({emoji, handle, words, segments, voiceDur, durationFrames}) => {
+          export const Fact: React.FC<Props> = ({words, segments, voiceDur, durationFrames, topText, bottomText}) => {
             const f = useCurrentFrame();
             const {fps, width} = useVideoConfig();
             const t = f / fps;
-            const pages = useMemo(() => makePages(words), [words]);
 
-            let idx = 0;
-            pages.forEach((p, i) => {
-              if (t >= p.start - 0.05) idx = i;
+            let idx = -1;
+            words.forEach((w, i) => {
+              if (t >= w.start - 0.03) idx = i;
             });
-            const page = pages[idx];
-            const pageStartFrame = page ? Math.round(page.start * fps) : 0;
-            const pop = spring({frame: Math.max(0, f - pageStartFrame), fps, config: {damping: 11, stiffness: 180}});
-            const outroStart = Math.round((voiceDur + 0.2) * fps);
-            const showCaptions = f < outroStart;
+            const w = idx >= 0 ? words[idx] : null;
+            const wf = w ? Math.max(0, f - Math.round(w.start * fps)) : 0;
+            const pop = spring({frame: wf, fps, config: {damping: 12, stiffness: 260}});
+            const showWord = w !== null && t < voiceDur + 0.2;
+            const text = w ? clean(w.text) : "";
+            const size = Math.min(124, Math.floor(900 / Math.max(1, text.length * 0.62)));
 
-            const emojiIn = spring({frame: f, fps, config: {damping: 8}});
-            const bob = Math.sin(f / 12) * 18;
-            const progress = Math.min(1, f / durationFrames);
+            const topIn = interpolate(f, [24, 34], [0, 1], {extrapolateLeft: "clamp", extrapolateRight: "clamp"});
+            const botOut = interpolate(t, [2.8, 3.2], [1, 0], {extrapolateLeft: "clamp", extrapolateRight: "clamp"});
 
             return (
-              <AbsoluteFill style={{fontFamily: FONT, overflow: "hidden", background: "#000"}}>
+              <AbsoluteFill style={{background: "#000", overflow: "hidden", fontFamily: FONT}}>
                 {(segments || []).map((sg, i) => (
-                  <Sequence key={i} from={Math.round(sg.from * fps)} durationInFrames={Math.round(sg.dur * fps) + 12}>
-                    <Clip src={sg.src} first={i === 0} />
+                  <Sequence key={i} from={sg.fromF} durationInFrames={sg.durF}>
+                    <Clip src={sg.src} startFrom={sg.startF} />
                   </Sequence>
                 ))}
 
-                <AbsoluteFill style={{background: "rgba(0,0,0,0.32)"}} />
+                <AbsoluteFill style={{background: "rgba(0,0,0,0.1)"}} />
 
-                <div style={{position: "absolute", top: 110, left: 120, width: width - 240, height: 10, borderRadius: 5, background: "rgba(255,255,255,0.2)"}}>
-                  <div style={{width: `${progress * 100}%`, height: "100%", borderRadius: 5, background: "#FFE14D"}} />
-                </div>
-
-                <div style={{position: "absolute", top: 170, width, textAlign: "center"}}>
-                  <span style={{display: "inline-block", padding: "16px 48px", borderRadius: 60, background: "rgba(255,255,255,0.16)", color: "#fff", fontSize: 42, fontWeight: 800, letterSpacing: 8}}>
-                    DAILY FACT
-                  </span>
-                </div>
-
-                {showCaptions && (
+                {topText ? (
                   <div
                     style={{
                       position: "absolute",
-                      top: 320,
+                      top: 480,
+                      width,
+                      boxSizing: "border-box",
+                      padding: "0 90px",
+                      textAlign: "center",
+                      fontFamily: TEXT_FONT,
+                      fontSize: 54,
+                      fontWeight: 700,
+                      color: "#fff",
+                      textShadow: "0 3px 14px rgba(0,0,0,0.85)",
+                      opacity: topIn,
+                    }}
+                  >
+                    {topText}
+                  </div>
+                ) : null}
+
+                {showWord && text ? (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: 1130,
+                      width,
+                      height: 200,
+                      display: "flex",
+                      justifyContent: "center",
+                      alignItems: "center",
+                      transform: `scale(${0.8 + 0.2 * pop})`,
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontSize: size,
+                        fontWeight: 900,
+                        color: "#fff",
+                        WebkitTextStroke: "16px #000",
+                        paintOrder: "stroke fill",
+                        textShadow: "0 8px 24px rgba(0,0,0,0.45)",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {text}
+                    </span>
+                  </div>
+                ) : null}
+
+                {bottomText && t < 3.2 ? (
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: 1530,
                       width,
                       textAlign: "center",
-                      fontSize: 220,
-                      transform: `translateY(${bob}px) scale(${emojiIn})`,
+                      fontFamily: TEXT_FONT,
+                      fontSize: 50,
+                      fontWeight: 600,
+                      color: "#fff",
+                      textShadow: "0 3px 14px rgba(0,0,0,0.85)",
+                      opacity: botOut,
                     }}
                   >
-                    {emoji}
+                    {bottomText}
                   </div>
-                )}
-
-                {showCaptions && page && (
-                  <div
-                    style={{
-                      position: "absolute",
-                      top: 820,
-                      left: 60,
-                      width: width - 120,
-                      height: 420,
-                      display: "flex",
-                      flexWrap: "wrap",
-                      justifyContent: "center",
-                      alignContent: "center",
-                      transform: `scale(${0.85 + 0.15 * pop})`,
-                      opacity: Math.min(1, pop * 1.5),
-                    }}
-                  >
-                    {page.words.map((w, i) => {
-                      const spoken = t >= w.start - 0.02;
-                      const last = i === page.words.length - 1;
-                      const active = spoken && (last || t < page.words[i + 1].start);
-                      return (
-                        <span
-                          key={i}
-                          style={{
-                            display: "inline-block",
-                            margin: "6px 14px",
-                            fontSize: 108,
-                            fontWeight: 900,
-                            textTransform: "uppercase",
-                            color: active ? "#FFE14D" : spoken ? "#FFFFFF" : "rgba(255,255,255,0.35)",
-                            transform: `scale(${active ? 1.16 : 1})`,
-                            WebkitTextStroke: "14px #1a1033",
-                            paintOrder: "stroke fill",
-                            textShadow: "0 10px 30px rgba(0,0,0,0.5)",
-                          }}
-                        >
-                          {w.text}
-                        </span>
-                      );
-                    })}
-                  </div>
-                )}
-
-                <Sequence from={outroStart}>
-                  <Outro handle={handle} />
-                </Sequence>
+                ) : null}
 
                 <Audio
                   src={staticFile("music.mp3")}
                   loop
                   volume={(fr) =>
-                    interpolate(fr, [0, 20, durationFrames - 30, durationFrames], [0, 0.11, 0.11, 0], {
+                    interpolate(fr, [0, 20, durationFrames - 30, durationFrames], [0, 0.08, 0.08, 0], {
                       extrapolateLeft: "clamp",
                       extrapolateRight: "clamp",
                     })
                   }
                 />
                 <Audio src={staticFile("voice.mp3")} volume={1} />
-                <Sequence from={0} durationInFrames={40}>
-                  <Audio src={staticFile("whoosh.mp3")} volume={0.45} />
-                </Sequence>
-                {pages.map((p, i) =>
-                  i > 0 ? (
-                    <Sequence key={i} from={Math.round(p.start * fps)} durationInFrames={12}>
-                      <Audio src={staticFile("pop.mp3")} volume={0.18} />
-                    </Sequence>
-                  ) : null
-                )}
-                <Sequence from={outroStart} durationInFrames={60}>
-                  <Audio src={staticFile("ding.mp3")} volume={0.4} />
-                </Sequence>
               </AbsoluteFill>
             );
           };
           EOF
           cat > prep.py << 'EOF'
-          import asyncio, json, math, os, random, re, shutil, subprocess
+          import asyncio, glob, json, math, os, random, re, shutil, subprocess
           import urllib.parse, urllib.request
           import edge_tts
 
@@ -346,6 +294,8 @@ jobs:
           voice = os.environ.get("VOICE", "").strip() or "en-US-GuyNeural"
           handle = os.environ.get("HANDLE", "@DailyFactsHub").strip()
           footage = os.environ.get("FOOTAGE", "").strip() or topic
+          top_text = os.environ.get("TOP_TEXT", "").strip()
+          bottom_text = os.environ.get("BOTTOM_TEXT", "").strip()
 
           if hook and hook[-1] not in ".?!":
               hook += "."
@@ -414,6 +364,7 @@ jobs:
                   cur += d
 
           TW, TH = 1080, 1920
+          SEG_PATTERN = [2.4, 2.9, 2.2, 2.7]
 
           def cover_scale(w, h):
               return max(TW / float(w), TH / float(h))
@@ -469,11 +420,81 @@ jobs:
               ok = [f for f in files if cover_scale(f["w"], f["h"]) <= 1.12 and f["size"] <= 150 * 1024 * 1024]
               return min(ok, key=lambda f: f["w"] * f["h"]) if ok else None
 
+          def probe_dur(path):
+              r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+                                 capture_output=True, text=True)
+              try:
+                  return float(r.stdout.strip())
+              except Exception:
+                  return 0.0
+
+          def make_clip(src, name, maxdur):
+              vf = "scale=%d:%d:force_original_aspect_ratio=increase:flags=lanczos,crop=%d:%d,fps=30,setsar=1" % (TW, TH, TW, TH)
+              subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", src, "-t", "%.2f" % maxdur, "-vf", vf,
+                              "-an", "-c:v", "libx264", "-crf", "16", "-preset", "medium",
+                              "-pix_fmt", "yuv420p", "-movflags", "+faststart", "public/" + name], check=True)
+              return probe_dur("public/" + name)
+
+          def windows(proc, j0):
+              out, t, j = [], 0.0, j0
+              while True:
+                  d = SEG_PATTERN[j % len(SEG_PATTERN)]
+                  if t + d + 0.3 > proc:
+                      break
+                  out.append((t, d))
+                  t += d
+                  j += 1
+              if not out:
+                  out.append((0.0, max(1.2, proc - 0.3)))
+              return out
+
+          def build_segments(clips, total):
+              for ci, c in enumerate(clips):
+                  c["wins"] = windows(c["dur"], ci)
+              order, k = [], 0
+              while True:
+                  added = False
+                  for ci, c in enumerate(clips):
+                      if k < len(c["wins"]):
+                          order.append((ci, c["wins"][k]))
+                          added = True
+                  if not added:
+                      break
+                  k += 1
+              total_f = int(math.ceil(total * FPS))
+              segs, cur_f, i = [], 0, 0
+              while cur_f < total_f:
+                  ci, (st, d) = order[i % len(order)]
+                  dur_f = max(1, int(round(d * FPS)))
+                  segs.append({"src": clips[ci]["src"], "fromF": cur_f, "durF": dur_f, "startF": int(round(st * FPS))})
+                  cur_f += dur_f
+                  i += 1
+              return segs
+
+          def collect_own():
+              exts = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
+              files = sorted(p for p in glob.glob("footage/*") if p.lower().endswith(exts))
+              random.shuffle(files)
+              clips = []
+              for p in files[:8]:
+                  name = "clip%d.mp4" % len(clips)
+                  try:
+                      d = make_clip(p, name, 20.0)
+                      if d >= 1.5:
+                          clips.append({"src": name, "dur": d, "source": "own"})
+                          print("Klip sendiri siap:", p, round(d, 1), "detik")
+                  except Exception as e:
+                      print("Klip sendiri gagal:", p, e)
+              return clips
+
           def fetch_footage(query, total):
+              own = collect_own()
+              if own:
+                  return build_segments(own, total), ["own"]
               pk = os.environ.get("PEXELS_API_KEY", "").strip()
               xk = os.environ.get("PIXABAY_API_KEY", "").strip()
               if not pk and not xk:
-                  raise SystemExit("GAGAL: isi PEXELS_API_KEY dan/atau PIXABAY_API_KEY di Settings > Secrets and variables > Actions")
+                  raise SystemExit("GAGAL: unggah klip ke folder footage di repo, atau isi PIXABAY_API_KEY / PEXELS_API_KEY di Settings > Secrets and variables > Actions")
               lists = []
               if pk:
                   lists.append(pexels_videos(query, pk))
@@ -490,7 +511,7 @@ jobs:
               if not pool:
                   raise SystemExit("GAGAL: tidak ada footage kualitas tinggi (min. Full HD) untuk kata kunci: " + query + ". Ganti kata kunci footage lalu jalankan ulang.")
 
-              need = min(6, max(3, int(math.ceil(total / 6.0))))
+              need = min(6, max(3, int(math.ceil(total / 8.0))))
               clips = []
               tried = 0
               for p in pool:
@@ -500,17 +521,14 @@ jobs:
                   f = best_file(p["files"])
                   raw = "raw%d.mp4" % tried
                   name = "clip%d.mp4" % len(clips)
-                  proc = min(p["dur"], 7.0)
                   try:
                       req = urllib.request.Request(f["link"], headers={"User-Agent": "Mozilla/5.0"})
                       with urllib.request.urlopen(req, timeout=120) as resp, open(raw, "wb") as out:
                           shutil.copyfileobj(resp, out)
-                      vf = "scale=%d:%d:force_original_aspect_ratio=increase:flags=lanczos,crop=%d:%d,fps=30,setsar=1" % (TW, TH, TW, TH)
-                      subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", raw, "-t", "%.2f" % proc, "-vf", vf,
-                                      "-an", "-c:v", "libx264", "-crf", "16", "-preset", "medium",
-                                      "-pix_fmt", "yuv420p", "-movflags", "+faststart", "public/" + name], check=True)
-                      clips.append({"src": name, "dur": proc, "source": p["source"]})
-                      print("Footage siap:", name, p["source"], "sumber", f["w"], "x", f["h"])
+                      d = make_clip(raw, name, min(p["dur"], 12.0))
+                      if d >= 1.5:
+                          clips.append({"src": name, "dur": d, "source": p["source"]})
+                          print("Footage siap:", name, p["source"], "sumber", f["w"], "x", f["h"])
                   except Exception as e:
                       print("Klip gagal diproses:", e)
                   finally:
@@ -518,19 +536,12 @@ jobs:
                           os.remove(raw)
               if not clips:
                   raise SystemExit("GAGAL: tidak ada klip yang berhasil diunduh. Jalankan ulang atau ganti kata kunci.")
+              return build_segments(clips, total), sorted(set(c["source"] for c in clips))
 
-              segs, t, i = [], 0.0, 0
-              while t < total:
-                  c = clips[i % len(clips)]
-                  d = max(2.0, min(c["dur"] - 0.6, 6.0))
-                  segs.append({"src": c["src"], "from": round(t, 3), "dur": round(d, 3)})
-                  t += d
-                  i += 1
-              return segs, sorted(set(c["source"] for c in clips))
-
-          frames = int(math.ceil((voice_dur + 2.2) * FPS))
+          frames = int(math.ceil((voice_dur + 0.6) * FPS))
           segments, sources = fetch_footage(footage, frames / float(FPS))
           props = {"hook": hook, "emoji": emoji, "handle": handle, "words": words, "segments": segments,
+                   "topText": top_text, "bottomText": bottom_text,
                    "voiceDur": voice_dur, "durationFrames": frames}
           with open("props.json", "w", encoding="utf-8") as fh:
               json.dump(props, fh, ensure_ascii=False)
@@ -561,7 +572,8 @@ jobs:
           if len(title) > 80:
               title = title[:77].rstrip() + "..."
           title += " #Shorts"
-          desc = (hook + " " + fact + "\n\nFollow " + handle + " for a new fact every day!\n\nFootage: " + ", ".join(sources) + "\n\n" + hashtags + " #shorts")
+          credit = "" if "own" in sources else "\n\nFootage: " + ", ".join(sources)
+          desc = (hook + " " + fact + "\n\nFollow " + handle + " for a new fact every day!" + credit + "\n\n" + hashtags + " #shorts")
           tiktok = hook + " " + emoji + " " + " ".join("#" + x for x in tags[:6])
           meta = ("=== YOUTUBE SHORTS ===\nJUDUL:\n" + title + "\n\nDESKRIPSI:\n" + desc +
                   "\n\nTAGS (isi di kolom tag):\n" + ", ".join(tags) +
@@ -572,7 +584,7 @@ jobs:
           print("Durasi suara:", voice_dur, "detik; total frame:", frames)
           EOF
 
-      - name: Buat suara AI, data, dan efek suara
+      - name: Buat suara AI, data, dan musik
         env:
           TOPIC: ${{ inputs.topic }}
           HOOK: ${{ inputs.hook }}
@@ -581,13 +593,12 @@ jobs:
           VOICE: ${{ inputs.voice }}
           HANDLE: ${{ inputs.handle }}
           FOOTAGE: ${{ inputs.footage }}
+          TOP_TEXT: ${{ inputs.top_text }}
+          BOTTOM_TEXT: ${{ inputs.bottom_text }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         run: |
           python prep.py
-          ffmpeg -y -v error -f lavfi -i "anoisesrc=d=0.9:c=pink:r=44100:a=0.6" -af "highpass=f=200,lowpass=f=5000,afade=t=in:st=0:d=0.35,afade=t=out:st=0.35:d=0.55" public/whoosh.mp3
-          ffmpeg -y -v error -f lavfi -i "sine=f=900:d=0.12" -af "afade=t=out:st=0:d=0.12" public/pop.mp3
-          ffmpeg -y -v error -f lavfi -i "sine=f=1318:d=1.2" -f lavfi -i "sine=f=1976:d=1.2" -filter_complex "amix=inputs=2,afade=t=out:st=0:d=1.2" public/ding.mp3
           if [ -f music.mp3 ]; then
             cp music.mp3 public/music.mp3
           else

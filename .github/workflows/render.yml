@@ -1,44 +1,10 @@
 name: Render Video Fakta
 
 on:
+  push:
+    paths:
+      - "prompt.txt"
   workflow_dispatch:
-    inputs:
-      topic:
-        description: "Topik untuk judul SEO, mis. Octopus"
-        default: "Octopus"
-      hook:
-        description: "Kalimat pembuka (hook)"
-        default: "Did you know octopuses have three hearts?"
-      fact:
-        description: "Isi fakta untuk narasi (Inggris, 2-4 kalimat)"
-        default: "Two hearts pump blood to the gills, and one pumps it to the rest of the body. Their blood is blue because it uses copper instead of iron. Amazing, right?"
-      footage:
-        description: "Kata kunci footage (Inggris), mis. ocean underwater"
-        default: "ocean underwater"
-      emoji:
-        description: "Emoji utama"
-        default: "🐙"
-      voice:
-        description: "Suara AI"
-        type: choice
-        default: en-US-AndrewMultilingualNeural
-        options:
-          - en-US-AndrewMultilingualNeural
-          - en-US-AvaMultilingualNeural
-          - en-US-BrianMultilingualNeural
-          - en-US-EmmaMultilingualNeural
-          - en-US-GuyNeural
-          - en-US-JennyNeural
-          - en-GB-RyanNeural
-      handle:
-        description: "Nama channel"
-        default: "@DailyFactsHub"
-      top_text:
-        description: "Teks kecil di atas layar (opsional)"
-        default: ""
-      bottom_text:
-        description: "Teks di bawah pada 3 detik awal (opsional)"
-        default: "Wait for it :)"
 
 jobs:
   render:
@@ -287,15 +253,38 @@ jobs:
           import urllib.parse, urllib.request
           import edge_tts
 
-          hook = os.environ.get("HOOK", "").strip()
-          fact = os.environ.get("FACT", "").strip()
-          topic = os.environ.get("TOPIC", "Facts").strip()
-          emoji = os.environ.get("EMOJI", "").strip() or "💡"
-          voice = os.environ.get("VOICE", "").strip() or "en-US-GuyNeural"
-          handle = os.environ.get("HANDLE", "@DailyFactsHub").strip()
-          footage = os.environ.get("FOOTAGE", "").strip() or topic
-          top_text = os.environ.get("TOP_TEXT", "").strip()
-          bottom_text = os.environ.get("BOTTOM_TEXT", "").strip()
+          def read_prompt(path="prompt.txt"):
+              if not os.path.exists(path):
+                  raise SystemExit("GAGAL: file prompt.txt tidak ditemukan di repo")
+              cfg = {}
+              with open(path, encoding="utf-8-sig") as fh:
+                  for line in fh:
+                      line = line.strip()
+                      if not line or line.startswith("#") or ":" not in line:
+                          continue
+                      k, v = line.split(":", 1)
+                      cfg[k.strip().lower()] = v.strip()
+              return cfg
+
+          cfg = read_prompt()
+          hook = cfg.get("hook", "").strip()
+          fact = cfg.get("fact", "").strip()
+          if not hook or not fact:
+              raise SystemExit("GAGAL: isi baris 'hook:' dan 'fact:' di prompt.txt")
+          topic = cfg.get("topic", "") or "Facts"
+          emoji = cfg.get("emoji", "") or "💡"
+          voice = cfg.get("voice", "") or "en-US-AndrewMultilingualNeural"
+          handle = cfg.get("handle", "") or "@DailyFactsHub"
+          footage = cfg.get("footage", "") or topic
+          top_text = cfg.get("top_text", "")
+          bottom_text = cfg.get("bottom_text", "")
+          sumber = (cfg.get("sumber", "") or "pixabay").lower()
+          if sumber.startswith(("send", "own")):
+              mode = "own"
+          elif sumber.startswith("pix"):
+              mode = "pixabay"
+          else:
+              raise SystemExit("GAGAL: 'sumber:' di prompt.txt harus 'sendiri' atau 'pixabay'")
 
           if hook and hook[-1] not in ".?!":
               hook += "."
@@ -373,29 +362,6 @@ jobs:
               req = urllib.request.Request(url, headers=headers)
               with urllib.request.urlopen(req, timeout=30) as resp:
                   return json.loads(resp.read().decode("utf-8"))
-
-          def pexels_videos(query, key):
-              hdr = {"Authorization": key, "User-Agent": "Mozilla/5.0"}
-              q = urllib.parse.quote(query)
-              vids = []
-              for base in ["https://api.pexels.com/videos/search", "https://api.pexels.com/v1/videos/search"]:
-                  try:
-                      data = http_json(base + "?query=" + q + "&orientation=portrait&min_duration=5&max_duration=40&per_page=40", hdr)
-                      vids = data.get("videos", [])
-                  except Exception as e:
-                      print("Pexels gagal:", base, e)
-                      vids = []
-                  if vids:
-                      break
-              items = []
-              for v in vids:
-                  files = []
-                  for x in v.get("video_files", []):
-                      if x.get("file_type") == "video/mp4" and x.get("width") and x.get("height") and x.get("link"):
-                          files.append({"link": x["link"], "w": x["width"], "h": x["height"], "size": 0})
-                  if files:
-                      items.append({"source": "Pexels", "dur": float(v.get("duration", 6)), "files": files})
-              return items
 
           def pixabay_videos(query, key):
               q = urllib.parse.quote(query[:100])
@@ -487,29 +453,21 @@ jobs:
                       print("Klip sendiri gagal:", p, e)
               return clips
 
-          def fetch_footage(query, total):
-              own = collect_own()
-              if own:
+          def fetch_footage(query, total, mode):
+              if mode == "own":
+                  own = collect_own()
+                  if not own:
+                      raise SystemExit("GAGAL: sumber 'sendiri' dipilih, tapi folder footage kosong atau klipnya tidak terbaca. Unggah klip ke folder footage.")
                   return build_segments(own, total), ["own"]
-              pk = os.environ.get("PEXELS_API_KEY", "").strip()
+
               xk = os.environ.get("PIXABAY_API_KEY", "").strip()
-              if not pk and not xk:
-                  raise SystemExit("GAGAL: unggah klip ke folder footage di repo, atau isi PIXABAY_API_KEY / PEXELS_API_KEY di Settings > Secrets and variables > Actions")
-              lists = []
-              if pk:
-                  lists.append(pexels_videos(query, pk))
-              if xk:
-                  lists.append(pixabay_videos(query, xk))
-              for lst in lists:
-                  random.shuffle(lst)
-              pool = []
-              for i in range(max(len(lst) for lst in lists)):
-                  for lst in lists:
-                      if i < len(lst):
-                          pool.append(lst[i])
-              pool = [p for p in pool if p["dur"] >= 5 and best_file(p["files"])]
+              if not xk:
+                  raise SystemExit("GAGAL: PIXABAY_API_KEY belum diisi di Settings > Secrets and variables > Actions")
+              vids = pixabay_videos(query, xk)
+              random.shuffle(vids)
+              pool = [p for p in vids if p["dur"] >= 5 and best_file(p["files"])]
               if not pool:
-                  raise SystemExit("GAGAL: tidak ada footage kualitas tinggi (min. Full HD) untuk kata kunci: " + query + ". Ganti kata kunci footage lalu jalankan ulang.")
+                  raise SystemExit("GAGAL: tidak ada footage kualitas tinggi (min. Full HD) untuk kata kunci: " + query + ". Ganti baris 'footage:' di prompt.txt.")
 
               need = min(6, max(3, int(math.ceil(total / 8.0))))
               clips = []
@@ -527,8 +485,8 @@ jobs:
                           shutil.copyfileobj(resp, out)
                       d = make_clip(raw, name, min(p["dur"], 12.0))
                       if d >= 1.5:
-                          clips.append({"src": name, "dur": d, "source": p["source"]})
-                          print("Footage siap:", name, p["source"], "sumber", f["w"], "x", f["h"])
+                          clips.append({"src": name, "dur": d, "source": "Pixabay"})
+                          print("Footage siap:", name, "Pixabay sumber", f["w"], "x", f["h"])
                   except Exception as e:
                       print("Klip gagal diproses:", e)
                   finally:
@@ -536,10 +494,10 @@ jobs:
                           os.remove(raw)
               if not clips:
                   raise SystemExit("GAGAL: tidak ada klip yang berhasil diunduh. Jalankan ulang atau ganti kata kunci.")
-              return build_segments(clips, total), sorted(set(c["source"] for c in clips))
+              return build_segments(clips, total), ["Pixabay"]
 
           frames = int(math.ceil((voice_dur + 0.6) * FPS))
-          segments, sources = fetch_footage(footage, frames / float(FPS))
+          segments, sources = fetch_footage(footage, frames / float(FPS), mode)
           props = {"hook": hook, "emoji": emoji, "handle": handle, "words": words, "segments": segments,
                    "topText": top_text, "bottomText": bottom_text,
                    "voiceDur": voice_dur, "durationFrames": frames}
@@ -586,16 +544,6 @@ jobs:
 
       - name: Buat suara AI, data, dan musik
         env:
-          TOPIC: ${{ inputs.topic }}
-          HOOK: ${{ inputs.hook }}
-          FACT: ${{ inputs.fact }}
-          EMOJI: ${{ inputs.emoji }}
-          VOICE: ${{ inputs.voice }}
-          HANDLE: ${{ inputs.handle }}
-          FOOTAGE: ${{ inputs.footage }}
-          TOP_TEXT: ${{ inputs.top_text }}
-          BOTTOM_TEXT: ${{ inputs.bottom_text }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         run: |
           python prep.py
